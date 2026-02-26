@@ -12,6 +12,7 @@ ENV PYTHONUNBUFFERED=1
 # These are already set in the base image but let's ensure they're correct
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV NVIDIA_DISABLE_REQUIRE=1
 
 # Install system dependencies (DO NOT install nvidia packages - they come with base image)
 RUN apt-get update && \
@@ -179,19 +180,16 @@ RUN sed -i 's/\r$//' start_training.sh && \
 ENV OMP_NUM_THREADS=4
 
 # Create a test script to verify everything works
-RUN echo '#!/bin/bash
-
-echo "=== Container Startup Test ===
-
-nvidia-smi check: $(which nvidia-smi)
-
-CUDA test: $(find /usr -name "libcuda.so.1" 2>/dev/null | head -1)
-
-compute_engine: $(ls -la /opt/bin/compute_engine)
-
-compute_engine_g: $(ls -la /opt/bin/compute_engine_g)
-
-=== Ready ==="' > /test_setup.sh && \
+RUN printf '%s\n' \
+    '#!/bin/bash' \
+    '' \
+    'echo "=== Container Startup Test ==="' \
+    'echo "nvidia-smi check: $(which nvidia-smi)"' \
+    'echo "CUDA test: $(find /usr -name '\''libcuda.so.1'\'' 2>/dev/null | head -1)"' \
+    'echo "compute_engine: $(ls -la /opt/bin/compute_engine)"' \
+    'echo "compute_engine_g: $(ls -la /opt/bin/compute_engine_g)"' \
+    'echo "=== Ready ==="' \
+    > /test_setup.sh && \
     chmod +x /test_setup.sh
 
 ENTRYPOINT ["tini", "--", "bash", "./start_training.sh"]
