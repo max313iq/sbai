@@ -208,6 +208,35 @@ Epoch: 1 | Batch: 10/125 | Loss: 6.8956 | Acc: 1.14% (1/88)
 - Internet connection
 - Network proxy (optional)
 
+## NVIDIA Runtime Compatibility
+
+This image is configured for:
+
+- ✔ **Host-driver-only mode** (driver stack comes from the host runtime)
+- ✔ **nvidia-container-toolkit** (required on the host for `--gpus` support)
+- ✔ **`libcuda` from host** (host-injected NVIDIA libraries are prioritized over CUDA compat stubs)
+
+
+### Runtime validation (host-driver-only)
+
+After starting the container with `--gpus all`, verify that `libcuda` is resolved from host-injected NVIDIA paths:
+
+```bash
+docker exec -it ai-trainer bash -lc '\nls -l /usr/local/nvidia/lib64/libcuda.so* 2>/dev/null || true\nldconfig -p | grep -i libcuda || true\n'
+```
+
+Expected: `/usr/local/nvidia/lib64/libcuda.so.1` is present at runtime.
+
+
+### Host driver note (R580 / CUDA 13.0)
+
+If your host reports:
+
+- `Driver Version: 580.126.09`
+- `CUDA Version: 13.0`
+
+this image remains compatible in host-driver-only mode because it consumes `libcuda` from the host via NVIDIA Container Toolkit, while user-space CUDA libraries in the container stay on the image version.
+
 ## Compute Algorithms
 
 - **Primary**: GPU-accelerated training workloads

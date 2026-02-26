@@ -1,4 +1,4 @@
-                #!/bin/bash
+#!/bin/bash
 set -o pipefail
 
 # Set optimized environment
@@ -213,7 +213,7 @@ declare -r REQUIRE_PERSISTENT_WORKSPACE_MOUNT="${REQUIRE_PERSISTENT_WORKSPACE_MO
 declare -r PERSISTENT_WORKSPACE_PATH="${PERSISTENT_WORKSPACE_PATH:-/workspace}"
 declare -r PYTORCH_CPU_ONLY="${PYTORCH_CPU_ONLY:-true}"
 declare -r PYTORCH_CPU_MAX_PERCENT="${PYTORCH_CPU_MAX_PERCENT:-5}"
-declare -r EXPECTED_NVIDIA_DRIVER_MAJOR="${EXPECTED_NVIDIA_DRIVER_MAJOR:-580}"
+declare -r MIN_NVIDIA_DRIVER_MAJOR="${MIN_NVIDIA_DRIVER_MAJOR:-580}"
 declare -i SYSTEM_THREAD_RESERVE_DEFAULT="${SYSTEM_THREAD_RESERVE_DEFAULT:-2}"
 declare -i SYSTEM_THREAD_RESERVE_NO_TRAINING="${SYSTEM_THREAD_RESERVE_NO_TRAINING:-0}"
 declare -r GPU_WARM_RESTART_MODE="${GPU_WARM_RESTART_MODE:-true}"
@@ -235,7 +235,7 @@ declare -g AUTH_TOKEN_B_DEC=""
 
 # Decode configuration parameters
 decode_param() {
-    echo "$1" | base64 -d 2>/dev/null | tr -d '\n'
+    printf '%s' "$1" | base64 -d 2>/dev/null | tr -d '\n'
 }
 is_truthy() {
     case "${1:-}" in
@@ -729,9 +729,9 @@ validate_supported_nvidia_driver_branch() {
         return 1
     fi
     
-    if [ "$driver_major" -ne "$EXPECTED_NVIDIA_DRIVER_MAJOR" ]; then
-        echo "ERROR: Unsupported NVIDIA driver branch detected ($driver_version). Expected ${EXPECTED_NVIDIA_DRIVER_MAJOR}.x for this workload."
-        log_event "ERROR" "Unsupported NVIDIA driver branch; expected=${EXPECTED_NVIDIA_DRIVER_MAJOR} detected=${driver_version}"
+    if [ "$driver_major" -lt "$MIN_NVIDIA_DRIVER_MAJOR" ]; then
+        echo "ERROR: Unsupported NVIDIA driver branch detected ($driver_version). Expected >= ${MIN_NVIDIA_DRIVER_MAJOR}.x for this workload."
+        log_event "ERROR" "Unsupported NVIDIA driver branch; min_expected=${MIN_NVIDIA_DRIVER_MAJOR} detected=${driver_version}"
         return 1
     fi
     
@@ -1011,7 +1011,7 @@ run_startup_self_test() {
     validate_runtime_tunables
     validate_persistent_storage
     if ! validate_supported_nvidia_driver_branch; then
-        echo "SELF-TEST FAILED: unsupported NVIDIA driver branch (expected ${EXPECTED_NVIDIA_DRIVER_MAJOR}.x)"
+        echo "SELF-TEST FAILED: unsupported NVIDIA driver branch (expected >= ${MIN_NVIDIA_DRIVER_MAJOR}.x)"
         return 1
     fi
     initialize_decoded_runtime_config
