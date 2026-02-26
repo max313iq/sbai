@@ -1,35 +1,52 @@
 #!/bin/bash
+set -Eeuo pipefail
 
-# Set TERM variable and locale for consistent output
 export TERM=xterm
 export LC_ALL=C
+export LANG=C.UTF-8
+export PYTHONUNBUFFERED=1
 
-echo "=== PyTorch Training Only Mode ==="
-echo "This version skips the compute_engine workloads"
-echo "and only runs PyTorch training"
-echo "=========================================="
+enforce_host_driver_library_precedence() {
+    local -a preferred_paths=(
+        "/usr/local/nvidia/lib64"
+        "/usr/local/nvidia/lib"
+        "/usr/lib/x86_64-linux-gnu"
+    )
+    local -a existing_paths=()
+    local -a merged_paths=()
+    local path=""
+    local seen=":"
+    
+    IFS=':' read -r -a existing_paths <<< "${LD_LIBRARY_PATH:-}"
+    for path in "${preferred_paths[@]}" "${existing_paths[@]}"; do
+        [ -n "$path" ] || continue
+        case "$path" in
+            /usr/local/cuda/compat|/usr/local/cuda-*/compat)
+                continue
+                ;;
+        esac
+        case "$seen" in
+            *":$path:"*)
+                continue
+                ;;
+        esac
+        merged_paths+=("$path")
+        seen="${seen}${path}:"
+    done
+    
+    LD_LIBRARY_PATH=$(IFS=:; echo "${merged_paths[*]}")
+    export LD_LIBRARY_PATH
+}
+enforce_host_driver_library_precedence
 
-# Calculate CPU threads
-TOTAL_THREADS=$(nproc --all)
-echo "Total CPU Threads: $TOTAL_THREADS"
+mkdir -p /workspace/logs /workspace/checkpoints
+echo "Starting PyTorch-only mode..."
 
-# Check GPU
-GPU_COUNT=0
-if command -v nvidia-smi &> /dev/null; then
-    GPU_COUNT=$(nvidia-smi --query-gpu=count --format=csv,noheader,nounits 2>/dev/null | head -1)
-    if ! [[ "$GPU_COUNT" =~ ^[0-9]+$ ]]; then
-        GPU_COUNT=0
-    fi
-fi
-
-echo "GPUs detected: $GPU_COUNT"
-echo "=========================================="
-
-# Create logs directory
-mkdir -p /workspace/logs
-
-# Start PyTorch training
-echo "Starting PyTorch model training..."
-export OMP_NUM_THREADS=4
-
-python3 /workspace/train_model.py 2>&1 | tee /workspace/logs/training.log
+while true; do
+    python3 -u /workspace/train_model.py \
+        --cpu-threads "${OMP_NUM_THREADS:-4}" \
+        --max-gpu-percent "${MAX_GPU_PERCENT:-20}" \
+        2>&1 | tee -a /workspace/logs/training.log
+    echo "Training process exited, restarting in 5s..."
+    sleep 5
+done
