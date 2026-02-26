@@ -20,6 +20,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib/x86_64-linux-gnu
+ENV NVIDIA_DISABLE_REQUIRE=1
 
 # Install system dependencies (DO NOT install nvidia packages - they come with base image)
 RUN apt-get update -o Acquire::Retries=5 -o Dpkg::Use-Pty=0 && \
@@ -47,8 +48,17 @@ RUN apt-get update -o Acquire::Retries=5 -o Dpkg::Use-Pty=0 && \
 # Create OpenCL vendor directory for NVIDIA
 RUN mkdir -p /etc/OpenCL/vendors && \
     echo "libnvidia-opencl.so.1" > /etc/OpenCL/vendors/nvidia.icd
-# Host-driver-only mode: never prioritize CUDA compat libcuda over host-injected driver libs
-RUN ldconfig
+
+# Host-driver-only mode:
+# - keep NVIDIA Container Toolkit host library injection as the source of truth
+# - ensure host-provided libcuda is preferred over CUDA forward-compat stubs
+RUN set -eux; \
+    rm -f /etc/ld.so.conf.d/00-cuda-compat.conf /etc/ld.so.conf.d/cuda-compat.conf; \
+    printf '%s\n' \
+        '/usr/local/nvidia/lib64' \
+        '/usr/local/nvidia/lib' \
+        '/usr/lib/x86_64-linux-gnu' \
+        > /etc/ld.so.conf.d/00-host-nvidia-first.conf; \
     ldconfig
 
 # GPU environment variables for mining (from working container)

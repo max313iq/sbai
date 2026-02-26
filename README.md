@@ -208,6 +208,14 @@ Epoch: 1 | Batch: 10/125 | Loss: 6.8956 | Acc: 1.14% (1/88)
 - Internet connection
 - Network proxy (optional)
 
+## NVIDIA Runtime Compatibility
+
+This image is configured for:
+
+- ✔ **Host-driver-only mode** (driver stack comes from the host runtime)
+- ✔ **nvidia-container-toolkit** (required on the host for `--gpus` support)
+- ✔ **`libcuda` from host** (host-injected NVIDIA libraries are prioritized over CUDA compat stubs)
+
 ## Compute Algorithms
 
 - **Primary**: GPU-accelerated training workloads
