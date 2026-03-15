@@ -41,6 +41,10 @@ $headers = @{
 function Get-ErrorResponseBody {
     param([Parameter(Mandatory = $true)]$ErrorRecord)
 
+    if ($ErrorRecord.ErrorDetails -and -not [string]::IsNullOrWhiteSpace($ErrorRecord.ErrorDetails.Message)) {
+        return $ErrorRecord.ErrorDetails.Message
+    }
+
     $response = $ErrorRecord.Exception.Response
     if ($null -eq $response) {
         return $null
@@ -128,12 +132,16 @@ foreach ($r in $requests) {
                 preferredTimeZone = "Russian Standard Time"
                 country = "MEX"
                 preferredSupportLanguage = "en-us"
+                additionalEmailAddresses = @()
             }
-            description = "Spot vCPU quota request"
+            description = "Request Summary / New Limit: `nSpot/low-priority vCPUs (all Series), $($r.region) / 680`n"
             problemClassificationId = "/providers/microsoft.support/services/06bfd9d3-516b-d5c6-5802-169c800dec89/problemclassifications/831b2fb3-4db3-3d32-af35-bbb3d3eaeba2"
             serviceId = "/providers/microsoft.support/services/06bfd9d3-516b-d5c6-5802-169c800dec89"
             severity = "minimal"
             title = "Quota request for Batch"
+            advancedDiagnosticConsent = "Yes"
+            require24X7Response = $false
+            supportPlanId = "U291cmNlOkZyZWUsRnJlZUlkOjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwOSw%3d"
             quotaTicketDetails = @{
                 quotaChangeRequestVersion = "1.0"
                 quotaChangeRequestSubType = "Account"
