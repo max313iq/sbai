@@ -15,7 +15,7 @@ param(
 
 if ([string]::IsNullOrWhiteSpace($Token)) {
     Write-Warning "Token is required. Pass -Token or set AZURE_BEARER_TOKEN."
-    Write-Host "Example: ./create_azure_support_tickets.ps1 -Token '<bearer-token>'"
+    Write-Host "Example: ./create_azure_support_tickets.ps1 -Token '<bearer-token-or-jwt>'"
     if ($MyInvocation.InvocationName -eq '.') {
         return
     }
@@ -27,19 +27,15 @@ if ($normalizedToken -match '^[Bb]earer\s+') {
     $normalizedToken = $normalizedToken -replace '^[Bb]earer\s+', ''
 }
 
-$headers = @(
-    "accept=*/*"
-    "accept-language=en"
-    "Authorization=Bearer $normalizedToken"
-    "content-type=application/json"
-)
-
 if ($MaxRequests -lt 0) {
     throw "MaxRequests cannot be negative."
 }
 
-if (-not $DryRun -and -not (Get-Command az -ErrorAction SilentlyContinue)) {
-    throw "Azure CLI 'az' was not found in PATH. Install Azure CLI or run with -DryRun for validation."
+$headers = @{
+    Accept = "*/*"
+    "Accept-Language" = "en"
+    Authorization = "Bearer $normalizedToken"
+    "Content-Type" = "application/json"
 }
 
 $requests = @(
@@ -130,21 +126,17 @@ foreach ($r in $requests) {
     $url = "https://management.azure.com/subscriptions/$($r.sub)/providers/Microsoft.Support/supportTickets/${ticket}?api-version=2025-06-01-preview"
 
     if ($DryRun) {
-        Write-Host "[DRY RUN] az rest --method put --url $url --headers <redacted> --skip-authorization-header --body $body"
+        Write-Host "[DRY RUN] Invoke-RestMethod -Method Put -Uri $url -Headers <redacted> -Body $body"
         Write-Host "[DRY RUN] Prepared quota request -> $($r.account)"
     }
     else {
-        az rest --method put `
-          --url $url `
-          --headers $headers `
-          --skip-authorization-header `
-          --body $body
-
-        if ($LASTEXITCODE -ne 0) {
-            throw "az rest failed for account '$($r.account)' in subscription '$($r.sub)'."
+        try {
+            $null = Invoke-RestMethod -Method Put -Uri $url -Headers $headers -Body $body
+            Write-Host "Submitted quota request -> $($r.account)"
         }
-
-        Write-Host "Submitted quota request -> $($r.account)"
+        catch {
+            throw "REST request failed for account '$($r.account)' in subscription '$($r.sub)'. $($_.Exception.Message)"
+        }
     }
 
     if ($DelaySeconds -gt 0) {
