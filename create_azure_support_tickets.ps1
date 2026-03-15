@@ -121,6 +121,7 @@ foreach ($r in $requests) {
 
     if ($DryRun) {
         Write-Host "[DRY RUN] az rest --method put --url $url --headers <redacted> --skip-authorization-header --body $body"
+        Write-Host "[DRY RUN] Prepared quota request -> $($r.account)"
     }
     else {
         az rest --method put `
@@ -128,9 +129,8 @@ foreach ($r in $requests) {
           --headers $headerString `
           --skip-authorization-header `
           --body $body
+        Write-Host "Submitted quota request -> $($r.account)"
     }
-
-    Write-Host "Submitted quota request -> $($r.account)"
 
     if ($DelaySeconds -gt 0) {
         Start-Sleep -Seconds $DelaySeconds
