@@ -10,7 +10,25 @@ param(
     [switch]$DryRun,
 
     [Parameter(Mandatory = $false)]
-    [int]$MaxRequests = 0
+    [int]$MaxRequests = 0,
+
+    [Parameter(Mandatory = $false)]
+    [string]$ProxyUrl,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$ProxyUseDefaultCredentials,
+
+    [Parameter(Mandatory = $false)]
+    [pscredential]$ProxyCredential,
+
+    [Parameter(Mandatory = $false)]
+    [int]$MaxRetries = 6,
+
+    [Parameter(Mandatory = $false)]
+    [int]$BaseRetrySeconds = 25,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$RotateFingerprint = $true
 )
 
 if ([string]::IsNullOrWhiteSpace($Token)) {
@@ -30,8 +48,14 @@ if ($normalizedToken -match '^[Bb]earer\s+') {
 if ($MaxRequests -lt 0) {
     throw "MaxRequests cannot be negative."
 }
+if ($MaxRetries -lt 0) {
+    throw "MaxRetries cannot be negative."
+}
+if ($BaseRetrySeconds -lt 1) {
+    throw "BaseRetrySeconds must be >= 1."
+}
 
-$headers = @{
+$baseHeaders = @{
     Accept = "*/*"
     "Accept-Language" = "en"
     Authorization = "Bearer $normalizedToken"
@@ -65,6 +89,59 @@ function Get-ErrorResponseBody {
     catch {
         return $null
     }
+}
+
+function Get-StatusCode {
+    param([Parameter(Mandatory = $true)]$ErrorRecord)
+
+    try {
+        $response = $ErrorRecord.Exception.Response
+        if ($null -eq $response) { return $null }
+        return [int]$response.StatusCode
+    }
+    catch { return $null }
+}
+
+function Is-ThrottledResponse {
+    param(
+        [Parameter(Mandatory = $false)]$StatusCode,
+        [Parameter(Mandatory = $false)][string]$ResponseBody,
+        [Parameter(Mandatory = $false)][string]$Message
+    )
+
+    if ($StatusCode -eq 429) { return $true }
+
+    $blob = "$ResponseBody $Message"
+    if ($blob -match '(?i)too\s*many\s*requests|throttl') {
+        return $true
+    }
+
+    return $false
+}
+
+function Get-RetryAfterSeconds {
+    param([Parameter(Mandatory = $true)]$ErrorRecord)
+
+    try {
+        $response = $ErrorRecord.Exception.Response
+        if ($null -eq $response) { return $null }
+        $retryAfter = $response.Headers["Retry-After"]
+        if ([string]::IsNullOrWhiteSpace($retryAfter)) { return $null }
+
+        $secs = 0
+        if ([int]::TryParse($retryAfter, [ref]$secs)) {
+            return $secs
+        }
+
+        $dt = [datetime]::MinValue
+        if ([datetime]::TryParse($retryAfter, [ref]$dt)) {
+            $delta = [math]::Ceiling(($dt.ToUniversalTime() - (Get-Date).ToUniversalTime()).TotalSeconds)
+            return [math]::Max(1, $delta)
+        }
+
+        return $null
+    }
+    catch { return $null }
 }
 
 $requests = @(
@@ -161,25 +238,64 @@ foreach ($r in $requests) {
     if ($DryRun) {
         Write-Host "[DRY RUN] Invoke-RestMethod -Method Put -Uri $url -Headers <redacted> -Body $body"
         Write-Host "[DRY RUN] Prepared quota request -> $($r.account)"
+        if ($DelaySeconds -gt 0) { Start-Sleep -Seconds $DelaySeconds }
+        continue
     }
-    else {
+
+    for ($attempt = 0; $attempt -le $MaxRetries; $attempt++) {
+        $requestHeaders = @{}
+        foreach ($k in $baseHeaders.Keys) { $requestHeaders[$k] = $baseHeaders[$k] }
+
+        if ($RotateFingerprint) {
+            $requestHeaders["User-Agent"] = "AzureQuotaBot/1.0 fp-$([guid]::NewGuid().ToString('N'))"
+            $requestHeaders["x-ms-client-request-id"] = [guid]::NewGuid().ToString()
+            $requestHeaders["x-ms-correlation-request-id"] = [guid]::NewGuid().ToString()
+        }
+
+        $invokeParams = @{
+            Method = "Put"
+            Uri = $url
+            Headers = $requestHeaders
+            Body = [System.Text.Encoding]::UTF8.GetBytes($body)
+            ContentType = "application/json; charset=utf-8"
+            ErrorAction = "Stop"
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($ProxyUrl)) {
+            $invokeParams["Proxy"] = $ProxyUrl
+            if ($ProxyUseDefaultCredentials) {
+                $invokeParams["ProxyUseDefaultCredentials"] = $true
+            }
+            elseif ($ProxyCredential) {
+                $invokeParams["ProxyCredential"] = $ProxyCredential
+            }
+        }
+
         try {
-            $null = Invoke-RestMethod `
-                -Method Put `
-                -Uri $url `
-                -Headers $headers `
-                -Body ([System.Text.Encoding]::UTF8.GetBytes($body)) `
-                -ContentType "application/json; charset=utf-8" `
-                -ErrorAction Stop
+            $null = Invoke-RestMethod @invokeParams
             Write-Host "Submitted quota request -> $($r.account)"
+            break
         }
         catch {
+            $status = Get-StatusCode -ErrorRecord $_
             $responseBody = Get-ErrorResponseBody -ErrorRecord $_
-            if (-not [string]::IsNullOrWhiteSpace($responseBody)) {
-                throw "REST request failed for account '$($r.account)' in subscription '$($r.sub)'. $($_.Exception.Message) ResponseBody: $responseBody"
+
+            if ((Is-ThrottledResponse -StatusCode $status -ResponseBody $responseBody -Message $_.Exception.Message) -and $attempt -lt $MaxRetries) {
+                $retryAfter = Get-RetryAfterSeconds -ErrorRecord $_
+                $backoff = [math]::Min(300, $BaseRetrySeconds * [math]::Pow(2, $attempt))
+                $jitter = Get-Random -Minimum 0 -Maximum 12
+                $sleepSeconds = if ($retryAfter) { [math]::Max($retryAfter, $backoff + $jitter) } else { $backoff + $jitter }
+
+                Write-Warning "429 throttled for $($r.account). Retry $($attempt + 1)/$MaxRetries in ${sleepSeconds}s."
+                Start-Sleep -Seconds $sleepSeconds
+                continue
             }
 
-            throw "REST request failed for account '$($r.account)' in subscription '$($r.sub)'. $($_.Exception.Message)"
+            if (-not [string]::IsNullOrWhiteSpace($responseBody)) {
+                throw "REST request failed for account '$($r.account)' in subscription '$($r.sub)'. HTTP $status. $($_.Exception.Message) ResponseBody: $responseBody"
+            }
+
+            throw "REST request failed for account '$($r.account)' in subscription '$($r.sub)'. HTTP $status. $($_.Exception.Message)"
         }
     }
 
