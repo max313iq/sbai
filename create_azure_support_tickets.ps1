@@ -24,6 +24,14 @@ if ([string]::IsNullOrWhiteSpace($Token)) {
 
 $headerString = "accept=*/* accept-language=en Authorization=Bearer $Token content-type=application/json"
 
+if ($MaxRequests -lt 0) {
+    throw "MaxRequests cannot be negative."
+}
+
+if (-not $DryRun -and -not (Get-Command az -ErrorAction SilentlyContinue)) {
+    throw "Azure CLI 'az' was not found in PATH. Install Azure CLI or run with -DryRun for validation."
+}
+
 $requests = @(
     @{sub="7eabeee6-a6a4-42b0-8c77-92ccc6253c4e"; account="aiprodeus01"; region="eastus"}
     @{sub="7eabeee6-a6a4-42b0-8c77-92ccc6253c4e"; account="aiprodscus01"; region="southcentralus"}
