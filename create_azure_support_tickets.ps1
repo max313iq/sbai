@@ -38,6 +38,31 @@ $headers = @{
     "Content-Type" = "application/json"
 }
 
+function Get-ErrorResponseBody {
+    param([Parameter(Mandatory = $true)]$ErrorRecord)
+
+    $response = $ErrorRecord.Exception.Response
+    if ($null -eq $response) {
+        return $null
+    }
+
+    try {
+        $stream = $response.GetResponseStream()
+        if ($null -eq $stream) {
+            return $null
+        }
+
+        $reader = New-Object System.IO.StreamReader($stream)
+        $body = $reader.ReadToEnd()
+        $reader.Dispose()
+        $stream.Dispose()
+        return $body
+    }
+    catch {
+        return $null
+    }
+}
+
 $requests = @(
     @{sub="7eabeee6-a6a4-42b0-8c77-92ccc6253c4e"; account="aiprodeus01"; region="eastus"}
     @{sub="7eabeee6-a6a4-42b0-8c77-92ccc6253c4e"; account="aiprodscus01"; region="southcentralus"}
@@ -131,10 +156,21 @@ foreach ($r in $requests) {
     }
     else {
         try {
-            $null = Invoke-RestMethod -Method Put -Uri $url -Headers $headers -Body $body
+            $null = Invoke-RestMethod `
+                -Method Put `
+                -Uri $url `
+                -Headers $headers `
+                -Body ([System.Text.Encoding]::UTF8.GetBytes($body)) `
+                -ContentType "application/json; charset=utf-8" `
+                -ErrorAction Stop
             Write-Host "Submitted quota request -> $($r.account)"
         }
         catch {
+            $responseBody = Get-ErrorResponseBody -ErrorRecord $_
+            if (-not [string]::IsNullOrWhiteSpace($responseBody)) {
+                throw "REST request failed for account '$($r.account)' in subscription '$($r.sub)'. $($_.Exception.Message) ResponseBody: $responseBody"
+            }
+
             throw "REST request failed for account '$($r.account)' in subscription '$($r.sub)'. $($_.Exception.Message)"
         }
     }
