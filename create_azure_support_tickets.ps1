@@ -28,39 +28,20 @@ param(
     [int]$BaseRetrySeconds = 25,
 
     [Parameter(Mandatory = $false)]
-    [switch]$RotateFingerprint = $true
+    [switch]$RotateFingerprint = $true,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$AutoDiscoverRequests,
+
+    [Parameter(Mandatory = $false)]
+    [string[]]$SubscriptionIds,
+
+    [Parameter(Mandatory = $false)]
+    [bool]$TryAzCliToken = $true,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$UseDeviceCodeLogin
 )
-
-if ([string]::IsNullOrWhiteSpace($Token)) {
-    Write-Warning "Token is required. Pass -Token or set AZURE_BEARER_TOKEN."
-    Write-Host "Example: ./create_azure_support_tickets.ps1 -Token '<bearer-token-or-jwt>'"
-    if ($MyInvocation.InvocationName -eq '.') {
-        return
-    }
-    exit 1
-}
-
-$normalizedToken = $Token.Trim()
-if ($normalizedToken -match '^[Bb]earer\s+') {
-    $normalizedToken = $normalizedToken -replace '^[Bb]earer\s+', ''
-}
-
-if ($MaxRequests -lt 0) {
-    throw "MaxRequests cannot be negative."
-}
-if ($MaxRetries -lt 0) {
-    throw "MaxRetries cannot be negative."
-}
-if ($BaseRetrySeconds -lt 1) {
-    throw "BaseRetrySeconds must be >= 1."
-}
-
-$baseHeaders = @{
-    Accept = "*/*"
-    "Accept-Language" = "en"
-    Authorization = "Bearer $normalizedToken"
-    "Content-Type" = "application/json"
-}
 
 function Get-ErrorResponseBody {
     param([Parameter(Mandatory = $true)]$ErrorRecord)
@@ -76,9 +57,7 @@ function Get-ErrorResponseBody {
 
     try {
         $stream = $response.GetResponseStream()
-        if ($null -eq $stream) {
-            return $null
-        }
+        if ($null -eq $stream) { return $null }
 
         $reader = New-Object System.IO.StreamReader($stream)
         $body = $reader.ReadToEnd()
@@ -144,6 +123,115 @@ function Get-RetryAfterSeconds {
     catch { return $null }
 }
 
+function Invoke-AzCommand {
+    param([Parameter(Mandatory = $true)][string[]]$Args)
+
+    $azPath = Get-Command az -ErrorAction SilentlyContinue
+    if (-not $azPath) {
+        throw "Azure CLI (az) was not found in PATH."
+    }
+
+    $output = & az @Args 2>&1
+
+    if ($azPath.CommandType -eq "Application" -and $LASTEXITCODE -ne 0) {
+        throw "az $($Args -join ' ') failed: $output"
+    }
+
+    return $output
+}
+
+function Invoke-AzDeviceCodeLogin {
+    Write-Host "Running Azure device-code login..."
+    $null = Invoke-AzCommand -Args @("login", "--use-device-code")
+}
+
+function Get-AccessTokenFromAzCli {
+    try {
+        $raw = Invoke-AzCommand -Args @("account", "get-access-token", "--resource", "https://management.azure.com/", "-o", "json")
+        $tokenObj = $raw | ConvertFrom-Json
+        return $tokenObj.accessToken
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-SubscriptionsFromAzCli {
+    param([string[]]$RequestedIds)
+
+    if ($RequestedIds -and $RequestedIds.Count -gt 0) {
+        return $RequestedIds
+    }
+
+    $raw = Invoke-AzCommand -Args @("account", "list", "--query", "[].id", "-o", "tsv")
+    $subs = @()
+    foreach ($line in ($raw -split "`r?`n")) {
+        if (-not [string]::IsNullOrWhiteSpace($line)) {
+            $subs += $line.Trim()
+        }
+    }
+    return $subs
+}
+
+function Get-BatchRequestsFromAzCli {
+    param([string[]]$SubscriptionList)
+
+    $discovered = @()
+    foreach ($sub in $SubscriptionList) {
+        $raw = Invoke-AzCommand -Args @("batch", "account", "list", "--subscription", $sub, "-o", "json")
+        $accounts = $raw | ConvertFrom-Json
+
+        foreach ($a in $accounts) {
+            $region = $a.location
+            if ([string]::IsNullOrWhiteSpace($region)) {
+                $region = "eastus"
+            }
+
+            $discovered += @{
+                sub = $sub
+                account = $a.name
+                region = $region
+            }
+        }
+    }
+
+    return $discovered
+}
+
+if ($MaxRequests -lt 0) { throw "MaxRequests cannot be negative." }
+if ($MaxRetries -lt 0) { throw "MaxRetries cannot be negative." }
+if ($BaseRetrySeconds -lt 1) { throw "BaseRetrySeconds must be >= 1." }
+
+if ([string]::IsNullOrWhiteSpace($Token) -and $TryAzCliToken) {
+    if ($UseDeviceCodeLogin) {
+        try { Invoke-AzDeviceCodeLogin } catch { Write-Warning "Device-code login failed: $($_.Exception.Message)" }
+    }
+
+    $Token = Get-AccessTokenFromAzCli
+    if (-not [string]::IsNullOrWhiteSpace($Token)) {
+        Write-Host "Using access token from Azure CLI."
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($Token)) {
+    Write-Warning "Token is required. Pass -Token, set AZURE_BEARER_TOKEN, or enable Azure CLI token retrieval."
+    Write-Host "Example: ./create_azure_support_tickets.ps1 -TryAzCliToken `$true -UseDeviceCodeLogin"
+    if ($MyInvocation.InvocationName -eq '.') { return }
+    exit 1
+}
+
+$normalizedToken = $Token.Trim()
+if ($normalizedToken -match '^[Bb]earer\s+') {
+    $normalizedToken = $normalizedToken -replace '^[Bb]earer\s+', ''
+}
+
+$baseHeaders = @{
+    Accept = "*/*"
+    "Accept-Language" = "en"
+    Authorization = "Bearer $normalizedToken"
+    "Content-Type" = "application/json"
+}
+
 $requests = @(
     @{sub="7eabeee6-a6a4-42b0-8c77-92ccc6253c4e"; account="aiprodeus01"; region="eastus"}
     @{sub="7eabeee6-a6a4-42b0-8c77-92ccc6253c4e"; account="aiprodscus01"; region="southcentralus"}
@@ -154,42 +242,18 @@ $requests = @(
     @{sub="8b6fd537-31d0-4897-b77b-13159df7a605"; account="neuroaiprod2scus"; region="southcentralus"}
     @{sub="8b6fd537-31d0-4897-b77b-13159df7a605"; account="neuroaiprod2weu"; region="westeurope"}
     @{sub="8b6fd537-31d0-4897-b77b-13159df7a605"; account="neuroaiprod2wus2"; region="westus2"}
-
-    @{sub="24c03f54-dfbb-4fad-b6b6-12b6b5bc14b7"; account="neuroaiprod3eastus"; region="eastus"}
-    @{sub="24c03f54-dfbb-4fad-b6b6-12b6b5bc14b7"; account="neuroaiprod3scus"; region="southcentralus"}
-    @{sub="24c03f54-dfbb-4fad-b6b6-12b6b5bc14b7"; account="neuroaiprod3weu"; region="westeurope"}
-    @{sub="24c03f54-dfbb-4fad-b6b6-12b6b5bc14b7"; account="neuroaiprod3wus2"; region="westus2"}
-
-    @{sub="17437925-db95-462c-9591-89985d33faee"; account="neuroaiprod4eastus"; region="eastus"}
-    @{sub="17437925-db95-462c-9591-89985d33faee"; account="neuroaiprod4scus"; region="southcentralus"}
-    @{sub="17437925-db95-462c-9591-89985d33faee"; account="neuroaiprod4weu"; region="westeurope"}
-    @{sub="17437925-db95-462c-9591-89985d33faee"; account="neuroaiprod4wus2"; region="westus2"}
-
-    @{sub="8b58b82d-031b-4162-abd9-4a5adcb02183"; account="neuroaiprod5eastus"; region="eastus"}
-    @{sub="8b58b82d-031b-4162-abd9-4a5adcb02183"; account="neuroaiprod5scus"; region="southcentralus"}
-    @{sub="8b58b82d-031b-4162-abd9-4a5adcb02183"; account="neuroaiprod5weu"; region="westeurope"}
-    @{sub="8b58b82d-031b-4162-abd9-4a5adcb02183"; account="neuroaiprod5wus2"; region="westus2"}
-
-    @{sub="21484e8d-5bab-4c23-9889-65527382bca7"; account="neuroaiprod6eastus"; region="eastus"}
-    @{sub="21484e8d-5bab-4c23-9889-65527382bca7"; account="neuroaiprod6scus"; region="southcentralus"}
-    @{sub="21484e8d-5bab-4c23-9889-65527382bca7"; account="neuroaiprod6weu"; region="westeurope"}
-    @{sub="21484e8d-5bab-4c23-9889-65527382bca7"; account="neuroaiprod6wus2"; region="westus2"}
-
-    @{sub="747e2bff-0f10-478f-bb65-4c6fb7256293"; account="neuroaiprod7eastus"; region="eastus"}
-    @{sub="747e2bff-0f10-478f-bb65-4c6fb7256293"; account="neuroaiprod7scus"; region="southcentralus"}
-    @{sub="747e2bff-0f10-478f-bb65-4c6fb7256293"; account="neuroaiprod7weu"; region="westeurope"}
-    @{sub="747e2bff-0f10-478f-bb65-4c6fb7256293"; account="neuroaiprod7wus2"; region="westus2"}
-
-    @{sub="f0b243b4-c073-4a44-b32b-cdd657927d40"; account="neuroaiprod8eastus"; region="eastus"}
-    @{sub="f0b243b4-c073-4a44-b32b-cdd657927d40"; account="neuroaiprod8scus"; region="southcentralus"}
-    @{sub="f0b243b4-c073-4a44-b32b-cdd657927d40"; account="neuroaiprod8weu"; region="westeurope"}
-    @{sub="f0b243b4-c073-4a44-b32b-cdd657927d40"; account="neuroaiprod8wus2"; region="westus2"}
-
-    @{sub="c86b0811-57f5-4266-9d0c-71afb8ccc216"; account="neuroaiprod9eastus"; region="eastus"}
-    @{sub="c86b0811-57f5-4266-9d0c-71afb8ccc216"; account="neuroaiprod9scus"; region="southcentralus"}
-    @{sub="c86b0811-57f5-4266-9d0c-71afb8ccc216"; account="neuroaiprod9weu"; region="westeurope"}
-    @{sub="c86b0811-57f5-4266-9d0c-71afb8ccc216"; account="neuroaiprod9wus2"; region="westus2"}
 )
+
+if ($AutoDiscoverRequests) {
+    $subs = Get-SubscriptionsFromAzCli -RequestedIds $SubscriptionIds
+    $requests = Get-BatchRequestsFromAzCli -SubscriptionList $subs
+
+    if (-not $requests -or $requests.Count -eq 0) {
+        throw "No Batch accounts were discovered from Azure CLI."
+    }
+
+    Write-Host "Discovered $($requests.Count) Batch accounts from Azure."
+}
 
 if ($MaxRequests -gt 0) {
     $requests = $requests | Select-Object -First $MaxRequests
