@@ -146,14 +146,65 @@ function Invoke-AzDeviceCodeLogin {
 }
 
 function Get-AccessTokenFromAzCli {
+    param(
+        [Parameter(Mandatory = $false)][string]$SubscriptionId,
+        [Parameter(Mandatory = $false)][string]$TenantId
+    )
+
     try {
-        $raw = Invoke-AzCommand -Args @("account", "get-access-token", "--resource", "https://management.azure.com/", "-o", "json")
+        $args = @("account", "get-access-token", "--resource", "https://management.azure.com/", "-o", "json")
+        if (-not [string]::IsNullOrWhiteSpace($SubscriptionId)) {
+            $args += @("--subscription", $SubscriptionId)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($TenantId)) {
+            $args += @("--tenant", $TenantId)
+        }
+
+        $raw = Invoke-AzCommand -Args $args
         $tokenObj = $raw | ConvertFrom-Json
         return $tokenObj.accessToken
     }
     catch {
         return $null
     }
+}
+
+function Get-SubscriptionTenantMapFromAzCli {
+    param([string[]]$FilterSubscriptionIds)
+
+    $raw = Invoke-AzCommand -Args @("account", "list", "--all", "-o", "json")
+    $accounts = $raw | ConvertFrom-Json
+
+    $map = @{}
+    foreach ($acct in $accounts) {
+        if ([string]::IsNullOrWhiteSpace($acct.id) -or [string]::IsNullOrWhiteSpace($acct.tenantId)) {
+            continue
+        }
+
+        if ($FilterSubscriptionIds -and $FilterSubscriptionIds.Count -gt 0 -and ($FilterSubscriptionIds -notcontains $acct.id)) {
+            continue
+        }
+
+        $map[$acct.id] = $acct.tenantId
+    }
+
+    return $map
+}
+
+function Get-TenantIdFromUnauthorizedBody {
+    param([Parameter(Mandatory = $false)][string]$ResponseBody)
+
+    if ([string]::IsNullOrWhiteSpace($ResponseBody)) {
+        return $null
+    }
+
+    $m = [regex]::Match($ResponseBody, 'sts\.windows\.net/([0-9a-fA-F-]{36})/')
+    if ($m.Success) { return $m.Groups[1].Value }
+
+    $m = [regex]::Match($ResponseBody, 'login\.windows\.net/([0-9a-fA-F-]{36})')
+    if ($m.Success) { return $m.Groups[1].Value }
+
+    return $null
 }
 
 function Get-SubscriptionsFromAzCli {
@@ -202,6 +253,7 @@ if ($MaxRequests -lt 0) { throw "MaxRequests cannot be negative." }
 if ($MaxRetries -lt 0) { throw "MaxRetries cannot be negative." }
 if ($BaseRetrySeconds -lt 1) { throw "BaseRetrySeconds must be >= 1." }
 
+$tokenFromAzCli = $false
 if ([string]::IsNullOrWhiteSpace($Token) -and $TryAzCliToken) {
     if ($UseDeviceCodeLogin) {
         try { Invoke-AzDeviceCodeLogin } catch { Write-Warning "Device-code login failed: $($_.Exception.Message)" }
@@ -209,6 +261,7 @@ if ([string]::IsNullOrWhiteSpace($Token) -and $TryAzCliToken) {
 
     $Token = Get-AccessTokenFromAzCli
     if (-not [string]::IsNullOrWhiteSpace($Token)) {
+        $tokenFromAzCli = $true
         Write-Host "Using access token from Azure CLI."
     }
 }
@@ -228,7 +281,6 @@ if ($normalizedToken -match '^[Bb]earer\s+') {
 $baseHeaders = @{
     Accept = "*/*"
     "Accept-Language" = "en"
-    Authorization = "Bearer $normalizedToken"
     "Content-Type" = "application/json"
 }
 
@@ -257,6 +309,19 @@ if ($AutoDiscoverRequests) {
 
 if ($MaxRequests -gt 0) {
     $requests = $requests | Select-Object -First $MaxRequests
+}
+
+$subscriptionTenantMap = @{}
+if ($TryAzCliToken) {
+    try {
+        $subscriptionTenantMap = Get-SubscriptionTenantMapFromAzCli -FilterSubscriptionIds ($requests | ForEach-Object { $_.sub } | Select-Object -Unique)
+        if ($subscriptionTenantMap.Count -gt 0) {
+            Write-Host "Resolved tenant IDs for $($subscriptionTenantMap.Count) subscriptions."
+        }
+    }
+    catch {
+        Write-Warning "Unable to resolve subscription -> tenant mapping from Azure CLI: $($_.Exception.Message)"
+    }
 }
 
 foreach ($r in $requests) {
@@ -310,6 +375,20 @@ foreach ($r in $requests) {
         $requestHeaders = @{}
         foreach ($k in $baseHeaders.Keys) { $requestHeaders[$k] = $baseHeaders[$k] }
 
+        if ($tokenFromAzCli) {
+            $tenantForSub = $null
+            if ($subscriptionTenantMap.ContainsKey($r.sub)) {
+                $tenantForSub = $subscriptionTenantMap[$r.sub]
+            }
+
+            $subScopedToken = Get-AccessTokenFromAzCli -SubscriptionId $r.sub -TenantId $tenantForSub
+            if (-not [string]::IsNullOrWhiteSpace($subScopedToken)) {
+                $normalizedToken = $subScopedToken.Trim()
+            }
+        }
+
+        $requestHeaders["Authorization"] = "Bearer $normalizedToken"
+
         if ($RotateFingerprint) {
             $requestHeaders["User-Agent"] = "AzureQuotaBot/1.0 fp-$([guid]::NewGuid().ToString('N'))"
             $requestHeaders["x-ms-client-request-id"] = [guid]::NewGuid().ToString()
@@ -343,6 +422,23 @@ foreach ($r in $requests) {
         catch {
             $status = Get-StatusCode -ErrorRecord $_
             $responseBody = Get-ErrorResponseBody -ErrorRecord $_
+
+            $tenantMismatch = $false
+            if ($status -eq 401) { $tenantMismatch = $true }
+            if ($responseBody -match '(?i)InvalidAuthenticationTokenTenant|wrong issuer|must match the tenant') { $tenantMismatch = $true }
+
+            if ($tokenFromAzCli -and $tenantMismatch -and $attempt -lt $MaxRetries) {
+                $tenantFromBody = Get-TenantIdFromUnauthorizedBody -ResponseBody $responseBody
+                if (-not [string]::IsNullOrWhiteSpace($tenantFromBody)) {
+                    $subscriptionTenantMap[$r.sub] = $tenantFromBody
+                    $tenantToken = Get-AccessTokenFromAzCli -SubscriptionId $r.sub -TenantId $tenantFromBody
+                    if (-not [string]::IsNullOrWhiteSpace($tenantToken)) {
+                        $normalizedToken = $tenantToken.Trim()
+                        Write-Warning "401 tenant mismatch for $($r.sub). Refreshed token for tenant $tenantFromBody and retrying."
+                        continue
+                    }
+                }
+            }
 
             if ((Is-ThrottledResponse -StatusCode $status -ResponseBody $responseBody -Message $_.Exception.Message) -and $attempt -lt $MaxRetries) {
                 $retryAfter = Get-RetryAfterSeconds -ErrorRecord $_
